@@ -49,7 +49,8 @@ namespace Gpt4All.Samples
 
         private void OnResponseHandler(string response)
         {
-            output.text = _previousText + response;
+            //output.text = _previousText + response;
+            //Debug.Log($"Response: {response}");
         }
     }
 }

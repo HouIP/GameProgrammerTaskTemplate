@@ -1,7 +1,11 @@
 ﻿using System;
-using System.Collections;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using UnityEngine;
+using Gpt4All;
+using TMPro;
+using UnityEditor;
+using Random = System.Random;
 
 public class BoardManager : MonoBehaviour
 {
@@ -30,24 +34,38 @@ public class BoardManager : MonoBehaviour
 
     public int[] EnPassantMove { set; get; }
 
+    public LlmManager manager;
+
+    [Header("UI")]
+    public GameObject chatBubbleUI;
+    public GameObject personalityUI;
+    public TextMeshProUGUI personalityText;
+    public TextMeshProUGUI output;
+    public bool isControlLocked = false;
+
     // Use this for initialization
     void Start()
     {
         Instance = this;
         SpawnAllChessmans();
         EnPassantMove = new int[2] { -1, -1 };
+
+        output.text = "As the commander of a medieval army, you must maintain your patience, for the battlefield delivers news of each encounter in due time. Remember, each chess piece possesses its own unique personality. Expected the unexpected! Now, lead with wisdom and cunning! \n\nWhite Turn\n";
     }
+
 
     // Update is called once per frame
     void Update()
     {
+        if (isControlLocked) return;
+
         UpdateSelection();
 
         if (Input.GetMouseButtonDown(0))
         {
             if (selectionX >= 0 && selectionY >= 0)
             {
-                if (selectedChessman == null)
+                if (selectedChessman == null && !isControlLocked)
                 {
                     // Select the chessman
                     SelectChessman(selectionX, selectionY);
@@ -57,11 +75,31 @@ public class BoardManager : MonoBehaviour
                     // Move the chessman
                     MoveChessman(selectionX, selectionY);
                 }
+                updatePersonalityUI(selectionX, selectionY);
             }
         }
 
         if (Input.GetKey("escape"))
             Application.Quit();
+    }
+
+    private void updatePersonalityUI(int x, int y)
+    {
+        if (Chessmans[x, y] != null)
+        {
+            Transform ChessmanTransform = Chessmans[x, y].transform;
+
+            if (!personalityUI.activeSelf) personalityUI.SetActive(true);
+            personalityUI.transform.position =
+                new Vector3(ChessmanTransform.position.x, 1.5f, ChessmanTransform.position.z);
+
+            // UI height override for king, queen
+            if (Chessmans[x, y].GetType() == typeof(King) || Chessmans[x, y].GetType() == typeof(Queen) ||
+                Chessmans[x, y].GetType() == typeof(Bishop))
+                personalityUI.transform.position =
+                    new Vector3(ChessmanTransform.position.x, 2.25f, ChessmanTransform.position.z);
+            personalityText.text = Chessmans[x, y].Personality;
+        }
     }
 
     private void SelectChessman(int x, int y)
@@ -89,6 +127,9 @@ public class BoardManager : MonoBehaviour
         if (!hasAtLeastOneMove)
             return;
 
+        chatBubbleUI.SetActive(true);
+        chatBubbleUI.transform.position = new Vector3(x, 0.5f, y);
+
         selectedChessman = Chessmans[x, y];
         previousMat = selectedChessman.GetComponent<MeshRenderer>().material;
         selectedMat.mainTexture = previousMat.mainTexture;
@@ -97,13 +138,83 @@ public class BoardManager : MonoBehaviour
         BoardHighlights.Instance.HighLightAllowedMoves(allowedMoves);
     }
 
+    // get the surrounding chessmen of a given chessman
+    private List<Chessman> GetSurroundingChessmen(int x, int y)
+    {
+        List<Chessman> surroundingChessmen = new ();
+
+        // Define relative coordinates for surrounding tiles
+        int[] dx = { -1, 0, 1, 0 }; // Left, Up, Right, Down
+        int[] dy = { 0, -1, 0, 1 };
+
+        for (int i = 0; i < dx.Length; i++)
+        {
+            int newX = x + dx[i];
+            int newY = y + dy[i];
+
+            // Check if the new coordinates are within the grid
+            if (newX >= 0 && newX < 8 && newY >= 0 && newY < 8)
+            {
+                //Debug.Log("x: " + newX + " y: " + newY);
+                surroundingChessmen.Add(Chessmans[x, y]);
+            }
+        }
+
+        return surroundingChessmen;
+    }
+
     private bool calculateVictory()
     {
         var rng = new System.Random();
         return rng.Next(0, 100) < 50;
     }
 
-    private void MoveChessman(int x, int y)
+    private async Task<bool> CalculateVictoryAsync(Chessman attackerChessman, Chessman defenderChessman)
+    {
+        string attacker = attackerChessman.Personality + " " + attackerChessman.GetType().ToString();
+        string defender = defenderChessman.Personality + " " + defenderChessman.GetType().ToString();
+
+        personalityUI.SetActive(false);
+        isControlLocked = true;
+        string fightDescription = "You command <color=green>" + attacker.ToLower() + "</color=green> launch a attack to the enemy <color=red>" + defender.ToLower() + "</color=red>!";
+
+        output.text += fightDescription + "\n";
+        ChatBubble.Instance.ShowDialogue("Waiting for result...", attackerChessman.transform.position);
+
+        string fightPrompt = "Determine the outcome of the following fight from " + attacker + " to " + defender + ". State the outcome of the fight, only say win or lost. Do not response with anything else";
+
+        string rawResponse = await manager.Prompt(fightPrompt);
+
+        bool result;
+        if (rawResponse.Contains("win"))
+        {
+            result = true;
+            string winPrompt = "Write a short line speaking like a " + attacker + " attacking " + defender + "in a medieval war";
+            rawResponse = await manager.Prompt(winPrompt);
+
+            output.text += "<color=green>" + attacker + "</color=green> win the fight!\n\n";
+            ChatBubble.Instance.ShowDialogue(rawResponse.Trim('"'), attackerChessman.transform.position);
+        }
+        else
+        {
+            result = false;
+            string losePrompt = "Write a short line speaking like a " + defender + " successfully fights back " + attacker + " in a medieval war";
+            rawResponse = await manager.Prompt(losePrompt);
+
+            output.text += "<color=green>" + attacker + "</color=green> lost the fight!\n\n";
+            ChatBubble.Instance.ShowDialogue(rawResponse.Trim('"'), defenderChessman.transform.position);
+        }
+
+        while (ChatBubble.Instance.isWriting)
+        {
+            await Task.Delay(2000);
+        }
+        ChatBubble.Instance.CloseDialogue();
+        isControlLocked = false;
+        return result;
+    }
+
+    private async void MoveChessman(int x, int y)
     {
         if (allowedMoves[x, y])
         {
@@ -121,7 +232,10 @@ public class BoardManager : MonoBehaviour
                     return;
                 }
 
-                victory = calculateVictory();
+                BoardHighlights.Instance.HideHighlights();
+                personalityUI.SetActive(false);
+                victory = await CalculateVictoryAsync(selectedChessman, c);
+                //victory = calculateVictory();
                 if (victory)
                 {
                     activeChessman.Remove(c.gameObject);
@@ -147,18 +261,19 @@ public class BoardManager : MonoBehaviour
             EnPassantMove[1] = -1;
             if (selectedChessman.GetType() == typeof(Pawn))
             {
+                string personality = selectedChessman.Personality;
                 if (y == 7) // White Promotion
                 {
                     activeChessman.Remove(selectedChessman.gameObject);
                     Destroy(selectedChessman.gameObject);
-                    SpawnChessman(1, x, y, true);
+                    SpawnChessman(1, x, y, true, personality);
                     selectedChessman = Chessmans[x, y];
                 }
                 else if (y == 0) // Black Promotion
                 {
                     activeChessman.Remove(selectedChessman.gameObject);
                     Destroy(selectedChessman.gameObject);
-                    SpawnChessman(7, x, y, false);
+                    SpawnChessman(7, x, y, false, personality);
                     selectedChessman = Chessmans[x, y];
                 }
                 EnPassantMove[0] = x;
@@ -174,10 +289,13 @@ public class BoardManager : MonoBehaviour
                 selectedChessman.transform.position = GetTileCenter(x, y);
                 selectedChessman.SetPosition(x, y);
                 Chessmans[x, y] = selectedChessman;
+                updatePersonalityUI(x, y);
             }
-            isWhiteTurn = !isWhiteTurn;
-        }
 
+            isWhiteTurn = !isWhiteTurn;
+            if (isWhiteTurn) output.text += "White Turn\n";
+            else output.text += "Black Turn\n";
+        }
         selectedChessman.GetComponent<MeshRenderer>().material = previousMat;
 
         BoardHighlights.Instance.HideHighlights();
@@ -201,7 +319,7 @@ public class BoardManager : MonoBehaviour
         }
     }
 
-    private void SpawnChessman(int index, int x, int y, bool isWhite)
+    private void SpawnChessman(int index, int x, int y, bool isWhite, string personality)
     {
         Vector3 position = GetTileCenter(x, y);
         GameObject go;
@@ -218,6 +336,7 @@ public class BoardManager : MonoBehaviour
         go.transform.SetParent(transform);
         Chessmans[x, y] = go.GetComponent<Chessman>();
         Chessmans[x, y].SetPosition(x, y);
+        Chessmans[x,y].SetPersonality(personality);
         activeChessman.Add(go);
     }
 
@@ -235,66 +354,74 @@ public class BoardManager : MonoBehaviour
         activeChessman = new List<GameObject>();
         Chessmans = new Chessman[8, 8];
 
+        string[] personalities = { "Brave", "Coward", "Loyal", "Treacherous", "Honest", "Deceitful", "Merciful", "Cruel" };
+
         /////// White ///////
 
         // King
-        SpawnChessman(0, 3, 0, true);
+        SpawnChessman(0, 3, 0, true, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
 
         // Queen
-        SpawnChessman(1, 4, 0, true);
+        SpawnChessman(1, 4, 0, true, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
 
         // Rooks
-        SpawnChessman(2, 0, 0, true);
-        SpawnChessman(2, 7, 0, true);
+        SpawnChessman(2, 0, 0, true, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
+        SpawnChessman(2, 7, 0, true, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
 
         // Bishops
-        SpawnChessman(3, 2, 0, true);
-        SpawnChessman(3, 5, 0, true);
+        SpawnChessman(3, 2, 0, true, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
+        SpawnChessman(3, 5, 0, true, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
 
         // Knights
-        SpawnChessman(4, 1, 0, true);
-        SpawnChessman(4, 6, 0, true);
+        SpawnChessman(4, 1, 0, true, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
+        SpawnChessman(4, 6, 0, true, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
 
         // Pawns
         for (int i = 0; i < 8; i++)
         {
-            SpawnChessman(5, i, 1, true);
+            SpawnChessman(5, i, 1, true, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
         }
 
 
         /////// Black ///////
 
         // King
-        SpawnChessman(6, 4, 7, false);
+        SpawnChessman(6, 4, 7, false, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
 
         // Queen
-        SpawnChessman(7, 3, 7, false);
+        SpawnChessman(7, 3, 7, false, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
 
         // Rooks
-        SpawnChessman(8, 0, 7, false);
-        SpawnChessman(8, 7, 7, false);
+        SpawnChessman(8, 0, 7, false, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
+        SpawnChessman(8, 7, 7, false, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
 
         // Bishops
-        SpawnChessman(9, 2, 7, false);
-        SpawnChessman(9, 5, 7, false);
+        SpawnChessman(9, 2, 7, false, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
+        SpawnChessman(9, 5, 7, false, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
 
         // Knights
-        SpawnChessman(10, 1, 7, false);
-        SpawnChessman(10, 6, 7, false);
+        SpawnChessman(10, 1, 7, false, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
+        SpawnChessman(10, 6, 7, false, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
 
         // Pawns
         for (int i = 0; i < 8; i++)
         {
-            SpawnChessman(11, i, 6, false);
+            SpawnChessman(11, i, 6, false, personalities[UnityEngine.Random.Range(0, personalities.Length)]);
         }
     }
 
     private void EndGame()
     {
         if (isWhiteTurn)
+        {
             Debug.Log("White wins");
+            output.text += "White wins! \n\n\n";
+        }
         else
+        {
             Debug.Log("Black wins");
+            output.text += "Black wins! \n\n\n";
+        }
 
         foreach (GameObject go in activeChessman)
         {

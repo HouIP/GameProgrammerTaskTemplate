@@ -7,8 +7,13 @@ public abstract class Chessman : MonoBehaviour
 
     public int CurrentX { set; get; }
     public int CurrentY { set; get; }
+    public string Personality { set; get; }
 
     public bool isWhite;
+    public void SetPersonality(string p)
+    {
+        Personality = p;
+    }
 
     public void SetPosition(int x, int y)
     {
